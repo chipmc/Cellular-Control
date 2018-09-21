@@ -251,23 +251,23 @@ void loop()
     if (alertValue != 0) resolveAlert();
     sendEvent();
     webhookTimeStamp = millis();
-    currentHourlyPeriod = Time.hour();                        // Change the time period since we have reported for this one
+    currentHourlyPeriod = Time.hour();                                // Change the time period since we have reported for this one
     waitUntil(meterParticlePublish);
     pettingEnabled = true;
     if (verboseMode) Particle.publish("State","Waiting for Response");
     lastPublish = millis();
-    state = RESP_WAIT_STATE;                            // Wait for Response
+    state = RESP_WAIT_STATE;                                          // Wait for Response
     } break;
 
   case RESP_WAIT_STATE:
-    if (!dataInFlight)                                  // Response received
+    if (!dataInFlight)                                                // Response received
     {
       state = IDLE_STATE;
       waitUntil(meterParticlePublish);
       if (verboseMode) Particle.publish("State","Idle");
       lastPublish = millis();
     }
-    else if (millis() - webhookTimeStamp >= webhookWait) {                                         // If it takes too long - will need to reset
+    else if (millis() - webhookTimeStamp >= webhookWait) {            // If it takes too long - will need to reset
       resetTimeStamp = millis();
       state = ERROR_STATE;  // Response timed out
       waitUntil(meterParticlePublish);
