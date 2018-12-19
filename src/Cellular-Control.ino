@@ -408,7 +408,7 @@ bool takeMeasurements() {
     alertValue = alertValue | 0b00000100;                                       // Set the value for alertValue
     pumpCurrentRaw = analogRead(pumpCurrentPin);                                // Current sensor is fairly linear from 1 to 32 Amps
     pumpAmps = map(pumpCurrentRaw,0,4095,0,32);                                 // Map analog voltage to current
-    if (pumpAmps >= lastPumpAmps +1 || pumpAmps <= lastPumpAmps -1) pumpAmpsSignificantChange = true;
+    if (pumpAmps >= lastPumpAmps + 2 || pumpAmps <= lastPumpAmps - 2) pumpAmpsSignificantChange = true;
     if (!(controlRegister & 0b00000010)) {                                      // This is a new pumping session
       pumpingStart = Time.now();
       FRAMwrite32(CURRENTCOUNTSTIME,pumpingStart);                              // Write to FRAM in case of a reset
