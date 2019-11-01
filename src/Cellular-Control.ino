@@ -43,7 +43,7 @@
 #define CURRENTCOUNTOFFSET 4          // Offsets for the values in the hourly words
 #define CURRENTDURATIONOFFSET 6       // Where the hourly battery charge is stored
 // Finally, here are the variables I want to change often and pull them all together here
-#define SOFTWARERELEASENUMBER "0.44"
+#define SOFTWARERELEASENUMBER "0.48"
 
 
 // Included Libraries
@@ -99,8 +99,8 @@ const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on t
 byte controlRegister;                               // Stores the control register values
 int lowBattLimit = 30;                              // Trigger for Low Batt State
 bool verboseMode;                                   // Enables more active communications for configutation and setup
-retained char SignalString[17];                           // Used to communicate Wireless RSSI and Description
-const char* levels[6] = {"Poor", "Low", "Medium", "Good", "Very Good", "Great"};
+char SignalString[64];                              // Used to communicate Wireless RSSI and Description
+const char* radioTech[10] = {"Unknown","None","WiFi","GSM","UMTS","CDMA","LTE","IEEE802154","LTE_CAT_M1","LTE_CAT_NB1"};
 bool pettingEnabled = true;
 
 // FRAM and Unix time variables
@@ -120,9 +120,11 @@ int pumpAmps = 0;
 int pumpCurrentRaw = 0;
 time_t pumpingStart = 0;
 int dailyPumpingMins = 0;
+bool pumpingEnabled = false;
 
+Timer pumpBackupTimer(3600000, pumpTimerCallback, true);       // This sets a limit on how long we can pump - set to 60 minutes
 
-void setup()                                                      // Note: Disconnected Setup()
+void setup()                                                   // Note: Disconnected Setup()
 {
   pinMode(pumpControlPin,OUTPUT);                               // Turns on the pump
   pinMode(pumpCurrentPin,INPUT);                                // Senses the pump current
@@ -202,16 +204,19 @@ void setup()                                                      // Note: Disco
 
   attachInterrupt(wakeUpPin, watchdogISR, RISING);   // The watchdog timer will signal us and we have to respond
 
+
+  pumpBackupTimer.stop();
+
   if (state != ERROR_STATE) state = IDLE_STATE;                         // IDLE unless error from above code
 }
+
+
 
 void loop()
 {
   switch(state) {
   case IDLE_STATE:
-    waitUntil(meterSampleRate);
-    if(takeMeasurements()) state = REPORTING_STATE;
-    lastSample = millis();
+    if (millis() - lastSample >= sampleFrequency) takeMeasurements();
     if (Time.hour() != currentHourlyPeriod) {
       state = REPORTING_STATE;                                    // We want to report on the hour
       if (Time.hour() == 0) {                                     // Check to see if it is midnight
@@ -220,11 +225,26 @@ void loop()
         Particle.syncTime();                                      // This is needed since these devices never disconnect
       }
     }
-    if (stateOfCharge <= lowBattLimit) LOW_BATTERY_STATE;         // The battery is low - sleep
+    if (pumpingEnabled) state = PUMPING_STATE;
+    if (stateOfCharge <= lowBattLimit) state = LOW_BATTERY_STATE;   // The battery is low - sleep
     break;
 
-  case PUMPING_STATE:
-    break;
+  case PUMPING_STATE: {
+    if (pumpingEnabled && !pinReadFast(pumpControlPin)) {       // First time to this state we will turn on the pump and report
+      digitalWrite(pumpControlPin,HIGH);
+      digitalWrite(blueLED,HIGH);
+      takeMeasurements();                                       // Take measurements since we have started pumping
+      pumpBackupTimer.start();
+      state = REPORTING_STATE;                                  // Report the pumping event
+    }
+    else if (!pumpingEnabled) {
+      digitalWrite(pumpControlPin,LOW);
+      digitalWrite(blueLED,LOW);
+      pumpBackupTimer.stop();
+      state = IDLE_STATE;                                       // Go back to IDLE.  Since pumping stopped - a report will be sent automatically
+    }
+  } break;
+
 
   case LOW_BATTERY_STATE: {
       if (Particle.connected()) {
@@ -254,7 +274,7 @@ void loop()
     currentHourlyPeriod = Time.hour();                                // Change the time period since we have reported for this one
     waitUntil(meterParticlePublish);
     pettingEnabled = true;
-    if (verboseMode) Particle.publish("State","Waiting for Response");
+    if (verboseMode) Particle.publish("State","Waiting for Response",PRIVATE);
     lastPublish = millis();
     state = RESP_WAIT_STATE;                                          // Wait for Response
     } break;
@@ -264,14 +284,14 @@ void loop()
     {
       state = IDLE_STATE;
       waitUntil(meterParticlePublish);
-      if (verboseMode) Particle.publish("State","Idle");
+      if (verboseMode) Particle.publish("State","Idle",PRIVATE);
       lastPublish = millis();
     }
     else if (millis() - webhookTimeStamp >= webhookWait) {            // If it takes too long - will need to reset
       resetTimeStamp = millis();
       state = ERROR_STATE;  // Response timed out
       waitUntil(meterParticlePublish);
-      Particle.publish("State","Response Timeout Error");
+      Particle.publish("State","Response Timeout Error",PRIVATE);
       lastPublish = millis();
     }
     break;
@@ -279,7 +299,7 @@ void loop()
     case ERROR_STATE:                                          // To be enhanced - where we deal with errors
       if (millis() - resetTimeStamp >= resetWait)
       {
-        if(verboseMode) Particle.publish("State","ERROR_STATE - Resetting");
+        if(verboseMode) Particle.publish("State","ERROR_STATE - Resetting",PRIVATE);
         delay(2000);
         if (resetCount <= 3)  System.reset();                 // Today, only way out is reset
         else {
@@ -290,6 +310,8 @@ void loop()
       break;
   }
 }
+
+void pumpTimerCallback() { pumpingEnabled = false; }
 
 void resolveAlert()
 {
@@ -316,7 +338,7 @@ void UbidotsHandler(const char *event, const char *data)  // Looks at the respon
   // Response Template: "{{hourly.0.status_code}}"
   if (!data) {                                            // First check to see if there is any data
     waitUntil(meterParticlePublish);
-    Particle.publish("Ubidots Hook", "No Data");
+    Particle.publish("Ubidots Hook", "No Data",PRIVATE);
     lastPublish = millis();
     return;
   }
@@ -324,20 +346,28 @@ void UbidotsHandler(const char *event, const char *data)  // Looks at the respon
   if ((responseCode == 200) || (responseCode == 201))
   {
     waitUntil(meterParticlePublish);
-    if(verboseMode) Particle.publish("State","Response Received");
+    if(verboseMode) Particle.publish("State","Response Received",PRIVATE);
     lastPublish = millis();
     dataInFlight = false;                                 // Data has been received
   }
-  else Particle.publish("Ubidots Hook", data);             // Publish the response code
+  else Particle.publish("Ubidots Hook", data, PRIVATE);             // Publish the response code
 }
 
 
 void getSignalStrength()
 {
-    CellularSignal sig = Cellular.RSSI();  // Prototype for Cellular Signal Montoring
-    int rssi = sig.rssi;
-    int strength = map(rssi, -131, -51, 0, 5);
-    snprintf(SignalString,17, "%s: %d", levels[strength], rssi);
+  // New Signal Strength capability - https://community.particle.io/t/boron-lte-and-cellular-rssi-funny-values/45299/8
+  CellularSignal sig = Cellular.RSSI();
+
+  auto rat = sig.getAccessTechnology();
+ 
+  //float strengthVal = sig.getStrengthValue();
+  float strengthPercentage = sig.getStrength();
+
+  //float qualityVal = sig.getQualityValue();
+  float qualityPercentage = sig.getQuality();
+
+  snprintf(SignalString,sizeof(SignalString), "%s S:%2.0f%%, Q:%2.0f%% ", radioTech[rat], strengthPercentage, qualityPercentage);
 }
 
 int getTemperature()
@@ -391,13 +421,15 @@ bool notConnected() {
 
 
 // Take measurements
-bool takeMeasurements() {
+void takeMeasurements() {
+  lastSample = millis();
   controlRegister = FRAMread8(CONTROLREGISTER);                                 // Check the control register
   byte lastAlertValue = alertValue;                                             // Last value - so we can detect a
   alertValueInt = int(alertValue);                                              // For reporting
   bool pumpAmpsSignificantChange = false;                                       // Don't want to waste bandwidth reporting small changes
   int lastPumpAmps = pumpAmps;                                                  // What was the pumpAmps measurement last time
   alertValue = 0b00000000;                                                      // Reset for each run through
+
   if (Cellular.ready()) getSignalStrength();                                    // Test signal strength if the cellular modem is on and ready
   getTemperature();                                                             // Get Temperature at startup as well
   stateOfCharge = int(batteryMonitor.getSoC());                                 // Percentage of full charge
@@ -423,8 +455,7 @@ bool takeMeasurements() {
   }
   else pumpAmps = 0;
   if (getLostPower()) alertValue = alertValue | 0b10000000;                      // Set the value for alertValue
-  if (alertValue != lastAlertValue || pumpAmpsSignificantChange) return 1;
-  else return 0;
+  if (alertValue != lastAlertValue || pumpAmpsSignificantChange) state = REPORTING_STATE;
 }
 
 
@@ -437,11 +468,11 @@ int pumpControl(String command)   // Will reset the local counts
 {
   if (command == "1")
   {
-    digitalWrite(pumpControlPin,HIGH);
-    digitalWrite(blueLED,HIGH);
-    delay(10000);
-    digitalWrite(pumpControlPin,LOW);
-    digitalWrite(blueLED,LOW);
+    pumpingEnabled = true;
+    return 1;
+  }
+  else if (command == "0") {
+    pumpingEnabled = false;
     return 1;
   }
   else return 0;
@@ -501,7 +532,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     controlRegister = (0b00001000 | controlRegister);                    // Turn on verboseMode
     FRAMwrite8(CONTROLREGISTER,controlRegister);                        // Write it to the register
     waitUntil(meterParticlePublish);
-    Particle.publish("Mode","Set Verbose Mode");
+    Particle.publish("Mode","Set Verbose Mode",PRIVATE);
     lastPublish = millis();
     return 1;
   }
@@ -512,7 +543,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     controlRegister = (0b11110111 & controlRegister);                    // Turn off verboseMode
     FRAMwrite8(CONTROLREGISTER,controlRegister);                        // Write it to the register
     waitUntil(meterParticlePublish);
-    Particle.publish("Mode","Cleared Verbose Mode");
+    Particle.publish("Mode","Cleared Verbose Mode",PRIVATE);
     lastPublish = millis();
     return 1;
   }
@@ -530,10 +561,10 @@ int setTimeZone(String command)
   t = Time.now();
   snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneOffset);
   waitUntil(meterParticlePublish);
-  Particle.publish("Time",data);
+  Particle.publish("Time",data,PRIVATE);
   lastPublish = millis();
   waitUntil(meterParticlePublish);
-  Particle.publish("Time",Time.timeStr(t));
+  Particle.publish("Time",Time.timeStr(t),PRIVATE);
   lastPublish = millis();
   return 1;
 }
