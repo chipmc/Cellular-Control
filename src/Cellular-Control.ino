@@ -16,6 +16,7 @@
 
 // v1.48 - Removing the old system of control by wire.  Particularly fixeing issue where webhook turns on pubm and wire turns it off
 // v1.49 - Ripped out the old FRAM stuff and moved to Pub / Sub for control
+// v1.50 - Relase Candidate - Fixed a few bugs
 
 // Namespace for the FRAM storage
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
@@ -39,7 +40,7 @@ namespace FRAM {                                    // Moved to namespace instea
 #include "electrondoc.h"                                 // Documents pinout
 
 // Prototypes and System Mode calls
-SYSTEM_MODE(AUTOMATIC);         // These devices are always connected
+SYSTEM_MODE(SEMI_AUTOMATIC);         // These devices are always connected
 SYSTEM_THREAD(ENABLED);         // Means my code will not be held up by Particle processes.
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 FuelGauge batteryMonitor;       // Prototype for the fuel gauge (included in Particle core library)
@@ -80,7 +81,6 @@ volatile bool watchdogFlag = false;
 // Program Variables
 int temperatureF;                                   // Global variable so we can monitor via cloud variable
 int resetCount;                                     // Counts the number of times the Electron has had a pin reset
-bool ledState = LOW;                                // variable used to store the last LED status, to toggle the light
 const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
 byte controlRegister;                               // Stores the control register values
 int lowBattLimit = 30;                              // Trigger for Low Batt State
@@ -206,11 +206,9 @@ void loop()
 
   case LOW_BATTERY_STATE: {
     if (verboseMode && state != oldState) publishStateTransition();
-      if (Particle.connected()) {
-        disconnectFromParticle();                               // If connected, we need to disconned and power down the modem
-      }
-      ledState = false;
+      if (Particle.connected()) disconnectFromParticle();       // If connected, we need to disconned and power down the modem
       digitalWrite(blueLED,LOW);                                // Turn off the LED
+      digitalWrite(pumpControlPin,LOW);                         // Turn off the pump as we cannot monitor in our sleep
       digitalWrite(tmp36Shutdwn, LOW);                          // Turns off the temp sensor
       int secondsToHour = (60*(60 - Time.minute()));            // Time till the top of the hour
       System.sleep(SLEEP_MODE_DEEP,secondsToHour);              // Very deep sleep till the next hour - then resets
@@ -276,7 +274,7 @@ void loop()
 void pumpTimerCallback() { pumpingEnabled = false; }
 
 void resolveAlert() {
-  char data[128] = "";
+  char data[128];
   if (alertValue & 0b00000001) strcat(data,"Control Power - ");
   if (alertValue & 0b00000010) strcat(data,"Low Level - ");
   if (alertValue & 0b00000100) strcat(data,"Pump On - ");
@@ -286,13 +284,13 @@ void resolveAlert() {
 }
 
 void sendEvent() {
-  char data[256];                                         // Store the date in this character array - not global
+  char data[256];                                                   // Store the date in this character array - not global
   snprintf(data, sizeof(data), "{\"alertValue\":%i, \"pumpAmps\":%i, \"pumpMins\":%i, \"battery\":%i, \"temp\":%i, \"resets\":%i}",alertValue, pumpAmps, dailyPumpingMins, stateOfCharge, temperatureF,resetCount);
   waitUntil(meterParticlePublish);
   Particle.publish("Monitoring_Event", data, PRIVATE);
   webhookTimeStamp = millis();
   currentHourlyPeriod = Time.hour();                                // Change the time period since we have reported for this one 
-  dataInFlight = true; // set the data inflight flag
+  dataInFlight = true;                                              // set the data inflight flag
 }
 
 void UbidotsHandler(const char *event, const char *data) { // Looks at the response from Ubidots - Will reset Photon if no successful response
@@ -512,8 +510,8 @@ bool meterParticlePublish(void)
 {
   static unsigned long lastPublish = 0;             // Keep track of when we publish a webhook
   if(millis() - lastPublish >= 1000) {
-    return 1;
     lastPublish = millis();
+    return 1;
   }
   else return 0;
 }

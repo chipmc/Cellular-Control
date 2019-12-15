@@ -73,7 +73,7 @@ namespace FRAM {                                    // Moved to namespace instea
 #include "electrondoc.h"                                 // Documents pinout
 
 // Prototypes and System Mode calls
-SYSTEM_MODE(AUTOMATIC);         // These devices are always connected
+SYSTEM_MODE(SEMI_AUTOMATIC);         // These devices are always connected
 SYSTEM_THREAD(ENABLED);         // Means my code will not be held up by Particle processes.
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
 FuelGauge batteryMonitor;       // Prototype for the fuel gauge (included in Particle core library)
@@ -310,7 +310,7 @@ void loop()
 void pumpTimerCallback() { pumpingEnabled = false; }
 
 void resolveAlert() {
-  char data[128] = "";
+  char data[128];
   if (alertValue & 0b00000001) strcat(data,"Control Power - ");
   if (alertValue & 0b00000010) strcat(data,"Low Level - ");
   if (alertValue & 0b00000100) strcat(data,"Pump On - ");
@@ -320,13 +320,13 @@ void resolveAlert() {
 }
 
 void sendEvent() {
-  char data[256];                                         // Store the date in this character array - not global
+  char data[256];                                                   // Store the date in this character array - not global
   snprintf(data, sizeof(data), "{\"alertValue\":%i, \"pumpAmps\":%i, \"pumpMins\":%i, \"battery\":%i, \"temp\":%i, \"resets\":%i}",alertValue, pumpAmps, dailyPumpingMins, stateOfCharge, temperatureF,resetCount);
   waitUntil(meterParticlePublish);
   Particle.publish("Monitoring_Event", data, PRIVATE);
   webhookTimeStamp = millis();
   currentHourlyPeriod = Time.hour();                                // Change the time period since we have reported for this one 
-  dataInFlight = true; // set the data inflight flag
+  dataInFlight = true;                                              // set the data inflight flag
 }
 
 void UbidotsHandler(const char *event, const char *data) { // Looks at the response from Ubidots - Will reset Photon if no successful response
@@ -546,8 +546,8 @@ bool meterParticlePublish(void)
 {
   static unsigned long lastPublish = 0;             // Keep track of when we publish a webhook
   if(millis() - lastPublish >= 1000) {
-    return 1;
     lastPublish = millis();
+    return 1;
   }
   else return 0;
 }
