@@ -32,7 +32,7 @@ namespace FRAM {                                    // Moved to namespace instea
 
 
 // Finally, here are the variables I want to change often and pull them all together here
-#define SOFTWARERELEASENUMBER "0.49"
+#define SOFTWARERELEASENUMBER "1.50"
 #define PUMPCHANNEL "FallsLakeBeaverDamn-FallsLake3-PumpControl"
 
 // Included Libraries
