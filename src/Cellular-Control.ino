@@ -7,7 +7,10 @@
 
 /*  This is the start of an update to the well head controllers we move toward taking control over the pumps
     In this release, we will no longer listen for the signals over the wire but will, instead take commands 
-    via webhook from Ubidots.  
+    via webhook from Ubidots and by subscribing to a Publish channel that the water storage faility will call out on.
+      - First step, water storage faility calls "pumps on" and Ubidots has an event that calls the Particle.function - Pump Control
+      - Next step, rewite the storage controller software to move to Publish, this device subscribes and no Ubidots Event needed 
+          - This is better in the long run as it can ensure that the pump will continue pumping if there is a reset
 
     The mode will be set and recoded in the CONTROLREGISTER so resets will not change the mode
     Control Register - bits 7-4, 3 - Verbose Mode, 2- Solar Power Mode, 1 - Pumping, 0 - Low Power Mode
@@ -33,22 +36,22 @@ namespace FRAM {                                    // Moved to namespace instea
 
 
 // Finally, here are the variables I want to change often and pull them all together here
-#define SOFTWARERELEASENUMBER "1.50"
+#define SOFTWARERELEASENUMBER "1.51"
 #define PUMPCHANNEL "FallsLakeBeaverDamn-FallsLake3-PumpControl"
 
 // Included Libraries
 #include "MB85RC256V-FRAM-RK.h"
-#include "electrondoc.h"                                 // Documents pinout
+#include "electrondoc.h"                                              // Documents pinout
 
 // Prototypes and System Mode calls
-SYSTEM_MODE(SEMI_AUTOMATIC);         // These devices are always connected
-SYSTEM_THREAD(ENABLED);         // Means my code will not be held up by Particle processes.
+SYSTEM_MODE(SEMI_AUTOMATIC);                                          // These devices are always connected
+SYSTEM_THREAD(ENABLED);                                               // Means my code will not be held up by Particle processes.
 STARTUP(System.enableFeature(FEATURE_RESET_INFO));
-FuelGauge batteryMonitor;       // Prototype for the fuel gauge (included in Particle core library)
-PMIC power;                     // Enables us to monitor the power supply to the board
+FuelGauge batteryMonitor;                                             // Prototype for the fuel gauge (included in Particle core library)
+PMIC power;                                                           // Enables us to monitor the power supply to the board
 MB85RC64 fram(Wire, 0);
 
-// State Maching Variables
+// State Machine Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, PUMPING_STATE, LOW_BATTERY_STATE, REPORTING_STATE, RESP_WAIT_STATE };
 char stateNames[8][14] = {"Initialize", "Error", "Idle", "Pumping", "Low Battery", "Reporting", "Response Wait" };
 State state = INITIALIZATION_STATE;
@@ -72,31 +75,31 @@ const int blueLED =           D7;               // This LED is on the Electron i
 // On the headers, GND is Blue-White and 3.3V is Orange
 
 // Timing Variables
-unsigned long webhookWait = 45000;              // How long we will wair for a webhook response
-unsigned long resetWait = 30000;                // Honw long we will wait before resetting on an error
-unsigned long sampleFrequency = 2000;           // How often will we take a sample
+unsigned long webhookWait = 45000;                                    // How long we will wair for a webhook response
+unsigned long resetWait = 30000;                                      // Honw long we will wait before resetting on an error
+unsigned long sampleFrequency = 2000;                                 // How often will we take a sample
 unsigned long webhookTimeStamp = 0;
 unsigned long resetTimeStamp = 0;
 volatile bool watchdogFlag = false;
 
 // Program Variables
-int temperatureF;                                   // Global variable so we can monitor via cloud variable
-int resetCount;                                     // Counts the number of times the Electron has had a pin reset
-const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
-byte controlRegister;                               // Stores the control register values
-int lowBattLimit = 30;                              // Trigger for Low Batt State
-bool verboseMode;                                   // Enables more active communications for configutation and setup
-char SignalString[64];                              // Used to communicate Wireless RSSI and Description
+int temperatureF;                                                     // Global variable so we can monitor via cloud variable
+int resetCount;                                                       // Counts the number of times the Electron has had a pin reset
+const char* releaseNumber = SOFTWARERELEASENUMBER;                    // Displays the release on the menu
+byte controlRegister;                                                 // Stores the control register values
+int lowBattLimit = 30;                                                // Trigger for Low Batt State
+bool verboseMode;                                                     // Enables more active communications for configutation and setup
+char SignalString[64];                                                // Used to communicate Wireless RSSI and Description
 const char* radioTech[10] = {"Unknown","None","WiFi","GSM","UMTS","CDMA","LTE","IEEE802154","LTE_CAT_M1","LTE_CAT_NB1"};
 
 // FRAM and Unix time variables
 time_t t;
-byte alertValue = 0;                        // Current Active Alerts
-bool dataInFlight = false;                  // Tracks if we have sent data but not yet cleared it from counts until we get confirmation
-byte currentHourlyPeriod;                   // This is where we will know if the period changed
+int alertValue = 0;                                                   // Current Active Alerts
+bool dataInFlight = false;                                            // Tracks if we have sent data but not yet cleared it from counts until we get confirmation
+byte currentHourlyPeriod;                                             // This is where we will know if the period changed
 
 // Battery monitor
-int stateOfCharge = 0;                      // stores battery charge level value
+int stateOfCharge = 0;                                                // stores battery charge level value
 
 // Pump control and monitoriing
 int pumpAmps = 0;
@@ -132,7 +135,7 @@ void setup()                                                          // Note: D
   }
   else Particle.publish("PubSub", "Subscribe Not successful",PRIVATE);
 
-  Particle.variable("Alerts", (int)alertValue);
+  Particle.variable("AlertValue", alertValue);
   Particle.variable("Signal", SignalString);
   Particle.variable("ResetCount", resetCount);
   Particle.variable("Temperature",temperatureF);

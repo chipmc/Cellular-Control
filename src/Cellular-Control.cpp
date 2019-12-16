@@ -13,7 +13,10 @@
 
 /*  This is the start of an update to the well head controllers we move toward taking control over the pumps
     In this release, we will no longer listen for the signals over the wire but will, instead take commands 
-    via webhook from Ubidots.  
+    via webhook from Ubidots and by subscribing to a Publish channel that the water storage faility will call out on.
+      - First step, water storage faility calls "pumps on" and Ubidots has an event that calls the Particle.function - Pump Control
+      - Next step, rewite the storage controller software to move to Publish, this device subscribes and no Ubidots Event needed 
+          - This is better in the long run as it can ensure that the pump will continue pumping if there is a reset
 
     The mode will be set and recoded in the CONTROLREGISTER so resets will not change the mode
     Control Register - bits 7-4, 3 - Verbose Mode, 2- Solar Power Mode, 1 - Pumping, 0 - Low Power Mode
@@ -23,6 +26,7 @@
 // v1.48 - Removing the old system of control by wire.  Particularly fixeing issue where webhook turns on pubm and wire turns it off
 // v1.49 - Ripped out the old FRAM stuff and moved to Pub / Sub for control
 // v1.50 - Relase Candidate - Fixed a few bugs
+// v1.51 - Fixed sampling during pumping - streamlined program flow and reduced lines of code
 
 // Namespace for the FRAM storage
 void setup();
@@ -52,7 +56,7 @@ void fullModemReset();
 void pumpControlHandler(const char *event, const char *data);
 void dailyCleanup();
 void publishStateTransition(void);
-#line 22 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
+#line 26 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x00,                   // 8- bits - Where we store the memory map version number
@@ -81,7 +85,7 @@ FuelGauge batteryMonitor;       // Prototype for the fuel gauge (included in Par
 PMIC power;                     // Enables us to monitor the power supply to the board
 MB85RC64 fram(Wire, 0);
 
-// State Maching Variables
+// State Machine Variables
 enum State { INITIALIZATION_STATE, ERROR_STATE, IDLE_STATE, PUMPING_STATE, LOW_BATTERY_STATE, REPORTING_STATE, RESP_WAIT_STATE };
 char stateNames[8][14] = {"Initialize", "Error", "Idle", "Pumping", "Low Battery", "Reporting", "Response Wait" };
 State state = INITIALIZATION_STATE;
@@ -113,23 +117,23 @@ unsigned long resetTimeStamp = 0;
 volatile bool watchdogFlag = false;
 
 // Program Variables
-int temperatureF;                                   // Global variable so we can monitor via cloud variable
-int resetCount;                                     // Counts the number of times the Electron has had a pin reset
-const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
-byte controlRegister;                               // Stores the control register values
-int lowBattLimit = 30;                              // Trigger for Low Batt State
-bool verboseMode;                                   // Enables more active communications for configutation and setup
-char SignalString[64];                              // Used to communicate Wireless RSSI and Description
+int temperatureF;                                                     // Global variable so we can monitor via cloud variable
+int resetCount;                                                       // Counts the number of times the Electron has had a pin reset
+const char* releaseNumber = SOFTWARERELEASENUMBER;                    // Displays the release on the menu
+byte controlRegister;                                                 // Stores the control register values
+int lowBattLimit = 30;                                                // Trigger for Low Batt State
+bool verboseMode;                                                     // Enables more active communications for configutation and setup
+char SignalString[64];                                                // Used to communicate Wireless RSSI and Description
 const char* radioTech[10] = {"Unknown","None","WiFi","GSM","UMTS","CDMA","LTE","IEEE802154","LTE_CAT_M1","LTE_CAT_NB1"};
 
 // FRAM and Unix time variables
 time_t t;
-byte alertValue = 0;                        // Current Active Alerts
-bool dataInFlight = false;                  // Tracks if we have sent data but not yet cleared it from counts until we get confirmation
-byte currentHourlyPeriod;                   // This is where we will know if the period changed
+int alertValue = 0;                                                   // Current Active Alerts
+bool dataInFlight = false;                                            // Tracks if we have sent data but not yet cleared it from counts until we get confirmation
+byte currentHourlyPeriod;                                             // This is where we will know if the period changed
 
 // Battery monitor
-int stateOfCharge = 0;                      // stores battery charge level value
+int stateOfCharge = 0;                                                // stores battery charge level value
 
 // Pump control and monitoriing
 int pumpAmps = 0;
@@ -165,7 +169,7 @@ void setup()                                                          // Note: D
   }
   else Particle.publish("PubSub", "Subscribe Not successful",PRIVATE);
 
-  Particle.variable("Alerts", (int)alertValue);
+  Particle.variable("Alerts", alertValue);
   Particle.variable("Signal", SignalString);
   Particle.variable("ResetCount", resetCount);
   Particle.variable("Temperature",temperatureF);
@@ -310,7 +314,7 @@ void resolveAlert() {
   if (alertValue & 0b00000100) strcat(data,"Pump On - ");
   if (alertValue & 0b10000000) strcat(data,"Particle Power");
   waitUntil(meterParticlePublish);
-  if(Particle.connected() && verboseMode) Particle.publish("Alerts",data,PRIVATE);
+  if(Particle.connected()) Particle.publish("Alerts",data,PRIVATE);
 }
 
 void sendEvent() {
