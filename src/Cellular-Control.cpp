@@ -22,6 +22,7 @@
 
 // v1.48 - Removing the old system of control by wire.  Particularly fixeing issue where webhook turns on pubm and wire turns it off
 // v1.49 - Ripped out the old FRAM stuff and moved to Pub / Sub for control
+// v1.50 - Relase Candidate - Fixed a few bugs
 
 // Namespace for the FRAM storage
 void setup();
@@ -51,7 +52,7 @@ void fullModemReset();
 void pumpControlHandler(const char *event, const char *data);
 void dailyCleanup();
 void publishStateTransition(void);
-#line 21 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
+#line 22 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x00,                   // 8- bits - Where we store the memory map version number
@@ -65,7 +66,7 @@ namespace FRAM {                                    // Moved to namespace instea
 
 
 // Finally, here are the variables I want to change often and pull them all together here
-#define SOFTWARERELEASENUMBER "0.49"
+#define SOFTWARERELEASENUMBER "1.50"
 #define PUMPCHANNEL "FallsLakeBeaverDamn-FallsLake3-PumpControl"
 
 // Included Libraries
@@ -114,7 +115,6 @@ volatile bool watchdogFlag = false;
 // Program Variables
 int temperatureF;                                   // Global variable so we can monitor via cloud variable
 int resetCount;                                     // Counts the number of times the Electron has had a pin reset
-bool ledState = LOW;                                // variable used to store the last LED status, to toggle the light
 const char* releaseNumber = SOFTWARERELEASENUMBER;  // Displays the release on the menu
 byte controlRegister;                               // Stores the control register values
 int lowBattLimit = 30;                              // Trigger for Low Batt State
@@ -138,22 +138,22 @@ time_t pumpingStart = 0;
 int dailyPumpingMins = 0;
 bool pumpingEnabled = false;
 
-Timer pumpBackupTimer(3600000, pumpTimerCallback, true);       // This sets a limit on how long we can pump - set to 60 minutes
+Timer pumpBackupTimer(3600000, pumpTimerCallback, true);              // This sets a limit on how long we can pump - set to 60 minutes
 
-void setup()                                                   // Note: Disconnected Setup()
+void setup()                                                          // Note: Disconnected Setup()
 {
-  pinMode(pumpControlPin,OUTPUT);                               // Turns on the pump
-  pinMode(pumpCurrentPin,INPUT);                                // Senses the pump current
-  pinMode(controlPowerPin,INPUT);                               // Voltage Sensor Interrupt pin
-  // pinMode(pumpOnPin,INPUT);                                     // Voltage Sensor Interrupt pin
-  pinMode(lowLevelPin,INPUT);                                   // Voltage Sensor Interrupt pin
-  pinMode(wakeUpPin,INPUT);                                       // This pin is active HIGH
-  pinMode(userSwitch,INPUT);                                      // Momentary contact button on board for direct user input
-  pinMode(blueLED, OUTPUT);                                       // declare the Blue LED Pin as an output
-  pinMode(tmp36Shutdwn,OUTPUT);                                   // Supports shutting down the TMP-36 to save juice
-  digitalWrite(tmp36Shutdwn, HIGH);                               // Turns on the temp sensor
-  pinMode(donePin,OUTPUT);                                        // Allows us to pet the watchdog
-  pinMode(hardResetPin,OUTPUT);                                   // For a hard reset active HIGH
+  pinMode(pumpControlPin,OUTPUT);                                     // Turns on the pump
+  pinMode(pumpCurrentPin,INPUT);                                      // Senses the pump current
+  pinMode(controlPowerPin,INPUT);                                     // Voltage Sensor Interrupt pin
+  // pinMode(pumpOnPin,INPUT);                                        // Voltage Sensor Interrupt pin
+  pinMode(lowLevelPin,INPUT);                                         // Voltage Sensor Interrupt pin
+  pinMode(wakeUpPin,INPUT);                                           // This pin is active HIGH
+  pinMode(userSwitch,INPUT);                                          // Momentary contact button on board for direct user input
+  pinMode(blueLED, OUTPUT);                                           // declare the Blue LED Pin as an output
+  pinMode(tmp36Shutdwn,OUTPUT);                                       // Supports shutting down the TMP-36 to save juice
+  digitalWrite(tmp36Shutdwn, HIGH);                                   // Turns on the temp sensor
+  pinMode(donePin,OUTPUT);                                            // Allows us to pet the watchdog
+  pinMode(hardResetPin,OUTPUT);                                       // For a hard reset active HIGH
 
   char responseTopic[125];
   String deviceID = System.deviceID();                                // Multiple Electrons share the same hook - keeps things straight
@@ -214,40 +214,36 @@ void loop()
   case IDLE_STATE:
     if (watchdogFlag) petWatchdog();
     if (verboseMode && state != oldState) publishStateTransition();
-    if (meterSampleRate()) takeMeasurements();                                    // Take measurements every couple seconds
     if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;              // We want to report on the hour
     if (stateOfCharge <= lowBattLimit) state = LOW_BATTERY_STATE;                 // The battery is low - sleep
     if (pumpingEnabled || digitalRead(pumpControlPin)) state = PUMPING_STATE;     // If we are pumping, we need to report
+    if (meterSampleRate()) takeMeasurements();                                    // Take measurements every couple seconds
     break;
 
   case PUMPING_STATE: {
     if (verboseMode && state != oldState) publishStateTransition();
-    if (pumpingEnabled && !digitalRead(pumpControlPin)) {       // First time to this state we will turn on the pump and report
+
+    if (pumpingEnabled && !digitalRead(pumpControlPin)) {             // First time to this state we will turn on the pump and report
       digitalWrite(pumpControlPin,HIGH);
       digitalWrite(blueLED,HIGH);
-      takeMeasurements();                                       // Take measurements since we have started pumping
       pumpBackupTimer.start();
-      state = REPORTING_STATE;                                  // Report the pumping event
     }
     else if (!pumpingEnabled && digitalRead(pumpControlPin)) {
       digitalWrite(pumpControlPin,LOW);
       digitalWrite(blueLED,LOW);
-      takeMeasurements();                                       // Take measurements since we have stoppeed pumping
       pumpBackupTimer.stop();
-      state = REPORTING_STATE;                                 // Report a change in the pumping status
     }
+    state = IDLE_STATE;                                             // Go back to IDLE to make sure housekeeping is done
   } break;
 
   case LOW_BATTERY_STATE: {
     if (verboseMode && state != oldState) publishStateTransition();
-      if (Particle.connected()) {
-        disconnectFromParticle();                               // If connected, we need to disconned and power down the modem
-      }
-      ledState = false;
-      digitalWrite(blueLED,LOW);                                // Turn off the LED
-      digitalWrite(tmp36Shutdwn, LOW);                          // Turns off the temp sensor
-      int secondsToHour = (60*(60 - Time.minute()));            // Time till the top of the hour
-      System.sleep(SLEEP_MODE_DEEP,secondsToHour);              // Very deep sleep till the next hour - then resets
+      if (Particle.connected()) disconnectFromParticle();             // If connected, we need to disconned and power down the modem
+      digitalWrite(blueLED,LOW);                                      // Turn off the LED
+      digitalWrite(pumpControlPin,LOW);                               // Turn off the pump as we cannot monitor in our sleep
+      digitalWrite(tmp36Shutdwn, LOW);                                // Turns off the temp sensor
+      int secondsToHour = (60*(60 - Time.minute()));                  // Time till the top of the hour
+      System.sleep(SLEEP_MODE_DEEP,secondsToHour);                    // Very deep sleep till the next hour - then resets
   } break;
 
   case REPORTING_STATE: 
@@ -263,20 +259,18 @@ void loop()
 
   case RESP_WAIT_STATE:
     if (verboseMode && state != oldState) publishStateTransition();
-    if (!dataInFlight)  {                                         // Response received
-      state = IDLE_STATE;
-      waitUntil(meterParticlePublish);
-      if (verboseMode) Particle.publish("State","Idle",PRIVATE);
-    }
+    if (!dataInFlight) state = IDLE_STATE;                            // Response received
     else if (millis() - webhookTimeStamp >= webhookWait) {            // If it takes too long - will need to reset
       resetTimeStamp = millis();
-      state = ERROR_STATE;  // Response timed out
-      waitUntil(meterParticlePublish);
-      Particle.publish("State","Response Timeout Error",PRIVATE);
+      state = ERROR_STATE;                                            // Response timed out
+      if (verboseMode) {
+        waitUntil(meterParticlePublish);
+        Particle.publish("State","Response Timeout Error",PRIVATE);
+      }
     }
     break;
 
-    case ERROR_STATE: {                                          // To be enhanced - where we deal with errors
+    case ERROR_STATE: {                                               // Here is where we deal with errors
       if (verboseMode && state != oldState) publishStateTransition();
       unsigned long lastWebHookResponse;
       fram.get(FRAM::lastHookResponseAddr,lastWebHookResponse);
@@ -337,14 +331,16 @@ void UbidotsHandler(const char *event, const char *data) { // Looks at the respo
     return;
   }
   int responseCode = atoi(data);                          // Response is only a single number thanks to Template
-  if ((responseCode == 200) || (responseCode == 201))
-  {
+  if ((responseCode == 200) || (responseCode == 201)) {
     waitUntil(meterParticlePublish);
-    if(verboseMode) Particle.publish("State","Response Received",PRIVATE);
+    Particle.publish("State","Response Received",PRIVATE);
     fram.put(FRAM::lastHookResponseAddr,Time.now());      // Keep track of last hook response
     dataInFlight = false;                                 // Data has been received
   }
-  else Particle.publish("Ubidots Hook", data, PRIVATE);             // Publish the response code
+  else {
+    waitUntil(meterParticlePublish);
+    Particle.publish("Ubidots Hook", data, PRIVATE);             // Publish the response code
+  }
 }
 
 
@@ -479,8 +475,7 @@ int resetFRAM(String command)   // Will reset the local counts
 
 int resetCounts(String command)   // Resets the current hourly and daily counts
 {
-  if (command == "1")
-  {
+  if (command == "1") {
     fram.put(FRAM::resetCountAddr,0);  // If so, store incremented number - watchdog must have done This
     resetCount = 0;
     dataInFlight = false;
@@ -512,8 +507,7 @@ int sendNow(String command) // Function to force sending data in current hour
 
 int setVerboseMode(String command) // Function to force sending data in current hour
 {
-  if (command == "1")
-  {
+  if (command == "1") {
     verboseMode = true;
     fram.get(FRAM::controlRegisterAddr,controlRegister);
     controlRegister = (0b00001000 | controlRegister);                    // Turn on verboseMode
@@ -522,8 +516,7 @@ int setVerboseMode(String command) // Function to force sending data in current 
     Particle.publish("Mode","Set Verbose Mode",PRIVATE);
     return 1;
   }
-  else if (command == "0")
-  {
+  else if (command == "0") {
     verboseMode = false;
     fram.get(FRAM::controlRegisterAddr,controlRegister);
     controlRegister = (0b11110111 & controlRegister);                    // Turn off verboseMode
@@ -542,8 +535,7 @@ bool getLostPower() {
 	return ((systemStatus & 0x04) == 0);
 }
 
-bool meterParticlePublish(void)
-{
+bool meterParticlePublish(void) {
   static unsigned long lastPublish = 0;             // Keep track of when we publish a webhook
   if(millis() - lastPublish >= 1000) {
     lastPublish = millis();
@@ -552,18 +544,16 @@ bool meterParticlePublish(void)
   else return 0;
 }
 
-bool meterSampleRate(void)
-{
+bool meterSampleRate(void) {
   static unsigned long lastSample = 0;
   if(millis() - lastSample >= sampleFrequency) {
-    return 1;
     lastSample = millis();
+    return 1;
   }
   else return 0;
 }
 
 void fullModemReset() {  // Adapted form Rikkas7's https://github.com/rickkas7/electronsample
-
 	Particle.disconnect(); 	                                         // Disconnect from the cloud
 	unsigned long startTime = millis();  	                           // Wait up to 15 seconds to disconnect
 	while(Particle.connected() && millis() - startTime < 15000) {
