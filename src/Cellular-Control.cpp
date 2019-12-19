@@ -27,6 +27,7 @@
 // v1.49 - Ripped out the old FRAM stuff and moved to Pub / Sub for control
 // v1.50 - Relase Candidate - Fixed a few bugs
 // v1.51 - Fixed sampling during pumping - streamlined program flow and reduced lines of code
+// v1.54 - Added Time Zone and DST calculations.  Added more messaging to understand WDT issues.
 
 // Namespace for the FRAM storage
 void setup();
@@ -58,7 +59,7 @@ void dailyCleanup();
 void publishStateTransition(void);
 int setTimeZone(String command);
 bool isDSTusa();
-#line 26 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
+#line 27 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x00,                   // 8- bits - Where we store the memory map version number
@@ -217,13 +218,11 @@ void setup()                                                          // Note: D
   int8_t tempTimeZoneValue;
   fram.get(FRAM::timeZoneAddr,tempTimeZoneValue);
   if (tempTimeZoneValue > 12 || tempTimeZoneValue < -12) {
-    Time.zone(-5);                                                      // Default is EST in case proper value not in FRAM
+    tempTimeZoneValue = -5;
     fram.put(FRAM::timeZoneAddr,tempTimeZoneValue);                     // Load the default value into FRAM for next time
   }
-  else Time.zone((float)tempTimeZoneValue);                             // Implement the local time Zone value
+  Time.zone((float)tempTimeZoneValue);                                  // Implement the local time Zone value
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
-
-
 
   stateOfCharge = int(batteryMonitor.getSoC());                         // Percentage of full charge
   if (stateOfCharge > lowBattLimit) connectToParticle();                // If not low battery, we can connect
@@ -658,7 +657,7 @@ int setTimeZone(String command) {                                       // Set t
   if ((tempTimeZoneValue < -12) || (tempTimeZoneValue > 12)) return 0; // Make sure it falls in a valid range or send a "fail" result
   Time.zone((float)tempTimeZoneValue);
   fram.put(FRAM::timeZoneAddr,tempTimeZoneValue);                       // Load the default value into FRAM for next time
-  snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneValue);
+  snprintf(data, sizeof(data), "Time base time zone is %i",tempTimeZoneValue);
   waitUntil(meterParticlePublish);
   if (Time.isValid()) DSTRULES() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);

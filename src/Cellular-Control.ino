@@ -182,13 +182,11 @@ void setup()                                                          // Note: D
   int8_t tempTimeZoneValue;
   fram.get(FRAM::timeZoneAddr,tempTimeZoneValue);
   if (tempTimeZoneValue > 12 || tempTimeZoneValue < -12) {
-    Time.zone(-5);                                                      // Default is EST in case proper value not in FRAM
+    tempTimeZoneValue = -5;
     fram.put(FRAM::timeZoneAddr,tempTimeZoneValue);                     // Load the default value into FRAM for next time
   }
-  else Time.zone((float)tempTimeZoneValue);                             // Implement the local time Zone value
+  Time.zone((float)tempTimeZoneValue);                                  // Implement the local time Zone value
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
-
-
 
   stateOfCharge = int(batteryMonitor.getSoC());                         // Percentage of full charge
   if (stateOfCharge > lowBattLimit) connectToParticle();                // If not low battery, we can connect
@@ -623,7 +621,7 @@ int setTimeZone(String command) {                                       // Set t
   if ((tempTimeZoneValue < -12) || (tempTimeZoneValue > 12)) return 0; // Make sure it falls in a valid range or send a "fail" result
   Time.zone((float)tempTimeZoneValue);
   fram.put(FRAM::timeZoneAddr,tempTimeZoneValue);                       // Load the default value into FRAM for next time
-  snprintf(data, sizeof(data), "Time zone offset %i",tempTimeZoneValue);
+  snprintf(data, sizeof(data), "Time base time zone is %i",tempTimeZoneValue);
   waitUntil(meterParticlePublish);
   if (Time.isValid()) DSTRULES() ? Time.beginDST() : Time.endDST();     // Perform the DST calculation here 
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
