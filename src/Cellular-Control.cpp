@@ -28,6 +28,10 @@
 // v1.50 - Relase Candidate - Fixed a few bugs
 // v1.51 - Fixed sampling during pumping - streamlined program flow and reduced lines of code
 // v1.54 - Added Time Zone and DST calculations.  Added more messaging to understand WDT issues.
+// v1.55 - Still having issues with the watchdog - added petting at Setup and Reporting.
+// v1.56 - Moved to all 32-bit values in FRAM
+// v1.57 - Added a pumping control variable
+// v1.58 - Added a pumping lockout feature
 
 // Namespace for the FRAM storage
 void setup();
@@ -45,6 +49,7 @@ bool disconnectFromParticle();
 bool notConnected();
 void takeMeasurements();
 int pumpControl(String command);
+int setPumpLockout(String command);
 int resetFRAM(String command);
 int resetCounts(String command);
 int hardResetNow(String command);
@@ -59,23 +64,24 @@ void dailyCleanup();
 void publishStateTransition(void);
 int setTimeZone(String command);
 bool isDSTusa();
-#line 27 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
+#line 31 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x00,                   // 8- bits - Where we store the memory map version number
-    controlRegisterAddr   = 0x01,                   // 8- bits - The control register for the device
-    timeZoneAddr          = 0x02,                   // 8- bits - The time zone for the device (Note, assumes US based Device)
-    resetCountAddr        = 0x03,                   // 32-bits - How many resets today
-    dailyPumpingMinsAddr  = 0x06,                   // 32-bits - How many minutes have we pumped today
-    pumpingStartAddr      = 0x0A,                   // 32-bits - Unix Time
-    lastHookResponseAddr  = 0x0E                    // 32-bits - Unix Time
+    controlRegisterAddr   = 0x04,                   // 8- bits - The control register for the device
+    timeZoneAddr          = 0x08,                   // 8- bits - The time zone for the device (Note, assumes US based Device)
+    resetCountAddr        = 0x0C,                   // 32-bits - How many resets today
+    pumpingLockoutAddr    = 0x10,                   // Adding a function to lock out pumping
+    dailyPumpingMinsAddr  = 0x20,                   // 32-bits - How many minutes have we pumped today
+    pumpingStartAddr      = 0x24,                   // 32-bits - Unix Time
+    lastHookResponseAddr  = 0x28                    // 32-bits - Unix Time 
   };
 };
 
 
 // Finally, here are the variables I want to change often and pull them all together here
 #define FRAMMEMORYMAPVERSION 1
-#define SOFTWARERELEASENUMBER "1.54"
+#define SOFTWARERELEASENUMBER "1.58"
 #define PUMPCHANNEL "FallsLakeBeaverDamn-FallsLake3-PumpControl"
 #define DSTRULES isDSTusa
 
@@ -148,7 +154,9 @@ int pumpAmps = 0;
 int pumpCurrentRaw = 0;
 time_t pumpingStart = 0;
 int dailyPumpingMins = 0;
-bool pumpingEnabled = false;
+bool pumpCalled = false;
+bool pumpLockOut = false;
+
 
 Timer pumpBackupTimer(3600000, pumpTimerCallback, true);              // This sets a limit on how long we can pump - set to 60 minutes
 
@@ -167,6 +175,7 @@ void setup()                                                          // Note: D
   pinMode(wakeUpPin,INPUT);                                           // This pin is active HIGH
   pinResetFast(donePin);
   pinMode(donePin,OUTPUT);                                            // Allows us to pet the watchdog
+  petWatchdog();                                                      // Proactively pet the watchdog
   attachInterrupt(wakeUpPin, watchdogISR, RISING);                    // The watchdog timer will signal us and we have to response
 
   char responseTopic[125];
@@ -188,14 +197,17 @@ void setup()                                                          // Note: D
   Particle.variable("pumpAmps",pumpAmps);
   Particle.variable("pumpMinutes",dailyPumpingMins);
   Particle.variable("TimeOffset",currentOffsetStr);
+  Particle.variable("PumpCalled", pumpCalled);
+  Particle.variable("PumpLockOut", pumpLockOut);
 
   Particle.function("Reset-FRAM", resetFRAM);
-  Particle.function("PumpControl",pumpControl);
+  Particle.function("PumpCalled",pumpControl);
   Particle.function("Reset-Counts",resetCounts);
   Particle.function("Hard-Reset",hardResetNow);
   Particle.function("Send-Now",sendNow);
   Particle.function("Verbose-Mode",setVerboseMode);
   Particle.function("Set-Timezone",setTimeZone);
+  Particle.function("PumpLockout",setPumpLockout);
 
 
   Particle.connect();
@@ -229,6 +241,8 @@ void setup()                                                          // Note: D
 
   pumpBackupTimer.stop();
 
+  fram.get(FRAM::pumpingLockoutAddr,pumpLockOut);                       // Retreive the value from memory so it persists
+
   if (state != ERROR_STATE) state = IDLE_STATE;                         // IDLE unless error from above code
 }
 
@@ -244,19 +258,19 @@ void loop()
     }
     if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;              // We want to report on the hour
     if (stateOfCharge <= lowBattLimit) state = LOW_BATTERY_STATE;                 // The battery is low - sleep
-    if (pumpingEnabled || digitalRead(pumpControlPin)) state = PUMPING_STATE;     // If we are pumping, we need to report
+    if (pumpCalled || digitalRead(pumpControlPin)) state = PUMPING_STATE;     // If we are pumping, we need to report
     if (meterSampleRate()) takeMeasurements();                                    // Take measurements every couple seconds
     break;
 
   case PUMPING_STATE: {
     if (verboseMode && state != oldState) publishStateTransition();
 
-    if (pumpingEnabled && !digitalRead(pumpControlPin)) {               // First time to this state we will turn on the pump and report
+    if (pumpCalled && !pumpLockOut && !digitalRead(pumpControlPin)) {               // First time to this state we will turn on the pump and report
       digitalWrite(pumpControlPin,HIGH);
       digitalWrite(blueLED,HIGH);
       pumpBackupTimer.start();
     }
-    else if (!pumpingEnabled && digitalRead(pumpControlPin)) {
+    else if (!pumpCalled && digitalRead(pumpControlPin)) {
       digitalWrite(pumpControlPin,LOW);
       digitalWrite(blueLED,LOW);
       pumpBackupTimer.stop();
@@ -278,6 +292,7 @@ void loop()
     if (verboseMode && state != oldState) publishStateTransition();
     if (Particle.connected()) {
       if (alertValue != 0)  resolveAlert();
+      petWatchdog();                                                    // Proactively pet the watchdog
       sendEvent();                                                      // Send data to Ubidots
       state = RESP_WAIT_STATE;                                          // Wait for Response
     }
@@ -332,7 +347,7 @@ void loop()
   }
 }
 
-void pumpTimerCallback() { pumpingEnabled = false; }
+void pumpTimerCallback() { pumpCalled = false; }
 
 void resolveAlert() {                                                   // This function takes the AlertValue and publishes a message
   char data[128];
@@ -459,7 +474,7 @@ void takeMeasurements() {
   alertValue = 0b00000000;                                              // Reset for each run through
   if (!pinReadFast(controlPowerPin)) alertValue = alertValue | 0b00000001;      // Set the value for alertValue - This is opposite - power is good
   if (!pinReadFast(lowLevelPin)) alertValue = alertValue | 0b00000010;  // Set the value for alertValue
-  if (pumpingEnabled)                                                   // If the pump is on
+  if (pumpCalled)                                                   // If the pump is on
   {
     alertValue = alertValue | 0b00000100;                               // Set the value for alertValue
     if (!(controlRegister & 0b00000010)) {                              // This is a new pumping session
@@ -490,11 +505,25 @@ void takeMeasurements() {
 int pumpControl(String command)                                         // This is the API end point to turn the pump on and off
 {
   if (command == "1") {
-    pumpingEnabled = true;
+    pumpCalled = true;
     return 1;
   }
   else if (command == "0") {
-    pumpingEnabled = false;
+    pumpCalled = false;
+    return 1;
+  }
+  else return 0;
+}
+
+int setPumpLockout(String command) {                                        // This is a way to esnure the pump will not pump even when called
+  if (command == "1") {
+    Particle.publish("Lockout","True",PRIVATE);
+    pumpLockOut = true;
+    return 1;
+  }
+  else if (command == "0") {
+    Particle.publish("Lockout","False",PRIVATE);
+    pumpLockOut = false;
     return 1;
   }
   else return 0;
@@ -609,12 +638,12 @@ void pumpControlHandler(const char *event, const char *data)
   char * pEND;
   int onOrOff = strtol(data,&pEND,10);
   if (onOrOff == 1) {
-    pumpingEnabled = true;
+    pumpCalled = true;
     waitUntil(meterParticlePublish);
     Particle.publish("Status", "Pump On Received",PRIVATE);
   }
   else if (onOrOff == 0) {
-    pumpingEnabled = false;
+    pumpCalled = false;
     waitUntil(meterParticlePublish);
     Particle.publish("Status", "Pump Off Received",PRIVATE);
   }
