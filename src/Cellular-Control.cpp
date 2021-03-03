@@ -2,7 +2,7 @@
 //       THIS IS A GENERATED FILE - DO NOT EDIT       //
 /******************************************************/
 
-#include "application.h"
+#include "Particle.h"
 #line 1 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
 /*
 * Project Cellular-Montoring - converged software for Monitoring Control Systems
@@ -31,7 +31,9 @@
 // v1.55 - Still having issues with the watchdog - added petting at Setup and Reporting.
 // v1.56 - Moved to all 32-bit values in FRAM
 // v1.57 - Added a pumping control variable
-// v1.58 - Added a pumping lockout feature
+// v1.58 - Added a persistent pumping lockout feature
+// v1.59 - Fixed issue with pump lockout value not being saved to FRAM
+// v1.60 - Moved failsafe from 60 to 95 mins, moved to deviceOS@2.0.1
 
 // Namespace for the FRAM storage
 void setup();
@@ -55,7 +57,6 @@ int resetCounts(String command);
 int hardResetNow(String command);
 int sendNow(String command);
 int setVerboseMode(String command);
-bool getLostPower();
 bool meterParticlePublish(void);
 bool meterSampleRate(void);
 void fullModemReset();
@@ -64,7 +65,7 @@ void dailyCleanup();
 void publishStateTransition(void);
 int setTimeZone(String command);
 bool isDSTusa();
-#line 31 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
+#line 33 "/Users/chipmc/Documents/Maker/Particle/Projects/Cellular-Control/src/Cellular-Control.ino"
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
   enum Addresses {
     versionAddr           = 0x00,                   // 8- bits - Where we store the memory map version number
@@ -81,7 +82,7 @@ namespace FRAM {                                    // Moved to namespace instea
 
 // Finally, here are the variables I want to change often and pull them all together here
 #define FRAMMEMORYMAPVERSION 1
-#define SOFTWARERELEASENUMBER "1.58"
+#define SOFTWARERELEASENUMBER "1.60"
 #define PUMPCHANNEL "FallsLakeBeaverDamn-FallsLake3-PumpControl"
 #define DSTRULES isDSTusa
 
@@ -158,7 +159,7 @@ bool pumpCalled = false;
 bool pumpLockOut = false;
 
 
-Timer pumpBackupTimer(3600000, pumpTimerCallback, true);              // This sets a limit on how long we can pump - set to 60 minutes
+Timer pumpBackupTimer(5700000, pumpTimerCallback, true);              // This sets a limit on how long we can pump - set to 95 minutes at Vinny's Request - email 3/3/21
 
 void setup()                                                          // Note: Disconnected Setup()
 {
@@ -489,7 +490,7 @@ void takeMeasurements() {
     dailyPumpingMins += int(difftime(pumpingStop,pumpingStart)/60);     // Add to the total for the day
     fram.put(FRAM::dailyPumpingMinsAddr,dailyPumpingMins);              // Store it in FRAM in case of a reset
   }
-  if (getLostPower()) alertValue = alertValue | 0b10000000;             // Set the value for alertValue
+  if (System.powerSource() == 5) alertValue = alertValue | 0b10000000;         // Set the value for alertValue if we are on battery power
 
   if (alertValue != lastAlertValue || pumpAmpsSignificantChange) state = REPORTING_STATE;
   lastAlertValue = alertValue;
@@ -519,11 +520,13 @@ int setPumpLockout(String command) {                                        // T
   if (command == "1") {
     Particle.publish("Lockout","True",PRIVATE);
     pumpLockOut = true;
+    fram.put(FRAM::pumpingLockoutAddr,pumpLockOut);
     return 1;
   }
   else if (command == "0") {
     Particle.publish("Lockout","False",PRIVATE);
     pumpLockOut = false;
+    fram.put(FRAM::pumpingLockoutAddr,pumpLockOut);
     return 1;
   }
   else return 0;
@@ -592,13 +595,6 @@ int setVerboseMode(String command)                                      // Funct
     return 1;
   }
   else return 0;
-}
-
-bool getLostPower() {
-	// Bit 2 (mask 0x4) == PG_STAT. If non-zero, power is good but we want to return 1 if power is lost.
-	// This means we're powered off USB or VIN, so we don't know for sure if there's a battery
-	byte systemStatus = power.getSystemStatus();
-	return ((systemStatus & 0x04) == 0);
 }
 
 bool meterParticlePublish(void) {
