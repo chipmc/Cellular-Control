@@ -28,6 +28,10 @@
 // v1.58 - Added a persistent pumping lockout feature
 // v1.59 - Fixed issue with pump lockout value not being saved to FRAM
 // v1.60 - Moved failsafe from 60 to 95 mins, moved to deviceOS@2.0.1
+// v1.61 - Bugfixes: got rid of watchdog publish
+// v1.62 - Bugfixes: Cleaned up alert reporting in the particle console
+// v1.63 - Updated to deviceOS@2.3.0
+// v1.64 - Serial Log Handler, Log info messages
 
 // Namespace for the FRAM storage
 namespace FRAM {                                    // Moved to namespace instead of #define to limit scope
@@ -43,16 +47,18 @@ namespace FRAM {                                    // Moved to namespace instea
   };
 };
 
+// For monitoring / debugging, you can uncomment the next line
+SerialLogHandler logHandler(LOG_LEVEL_INFO);
 
 // Finally, here are the variables I want to change often and pull them all together here
 #define FRAMMEMORYMAPVERSION 1
-#define SOFTWARERELEASENUMBER "1.60"
-#define PUMPCHANNEL "FallsLakeBeaverDamn-FallsLake3-PumpControl"
+#define SOFTWARERELEASENUMBER "1.64"
+// #define PUMPCHANNEL "FallsLakeBeaverDamn-FallsLake3-PumpControl"
 #define DSTRULES isDSTusa
 
 // Included Libraries
 #include "MB85RC256V-FRAM-RK.h"
-#include "electrondoc.h"                                              // Documents pinout
+#include "electrondoc.h"                                              // Documents pinout term
 
 // Prototypes and System Mode calls
 SYSTEM_MODE(SEMI_AUTOMATIC);                                          // These devices are always connected
@@ -143,15 +149,19 @@ void setup()                                                          // Note: D
   petWatchdog();                                                      // Proactively pet the watchdog
   attachInterrupt(wakeUpPin, watchdogISR, RISING);                    // The watchdog timer will signal us and we have to response
 
+  Particle.connect();
+
   char responseTopic[125];
   String deviceID = System.deviceID();                                // Multiple Electrons share the same hook - keeps things straight
   deviceID.toCharArray(responseTopic,125);
   Particle.subscribe(responseTopic, UbidotsHandler, MY_DEVICES);      // Subscribe to the integration response event
 
+  /*
   if (Particle.subscribe(PUMPCHANNEL, pumpControlHandler, MY_DEVICES)) {
     Particle.publish("PubSub", "Subscribe successful",PRIVATE);
   }
   else Particle.publish("PubSub", "Subscribe Not successful",PRIVATE);
+  */
 
   Particle.variable("AlertValue", alertValue);
   Particle.variable("Signal", SignalString);
@@ -173,9 +183,6 @@ void setup()                                                          // Note: D
   Particle.function("Verbose-Mode",setVerboseMode);
   Particle.function("Set-Timezone",setTimeZone);
   Particle.function("PumpLockout",setPumpLockout);
-
-
-  Particle.connect();
 
   fram.begin();                                                         // Initializes Wire but does not return a boolean on successful initialization
 
@@ -202,7 +209,10 @@ void setup()                                                          // Note: D
   snprintf(currentOffsetStr,sizeof(currentOffsetStr),"%2.1f UTC",(Time.local() - Time.now()) / 3600.0);
 
   stateOfCharge = int(batteryMonitor.getSoC());                         // Percentage of full charge
-  if (stateOfCharge > lowBattLimit) connectToParticle();                // If not low battery, we can connect
+  if (stateOfCharge > lowBattLimit) {
+    if (!connectToParticle()) state = ERROR_STATE;                        // If not low battery, we can connect
+    Log.info("Failed connection attempt");
+  }
 
   pumpBackupTimer.stop();
 
@@ -216,28 +226,26 @@ void loop()
   switch(state) {
   case IDLE_STATE:
     if (verboseMode && state != oldState) publishStateTransition();
-    if (watchdogFlag)  {
-      waitUntil(meterParticlePublish);
-      Particle.publish("State","Watchdog flag",PRIVATE);
-      petWatchdog();
-    }
-    if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;              // We want to report on the hour
-    if (stateOfCharge <= lowBattLimit) state = LOW_BATTERY_STATE;                 // The battery is low - sleep
-    if (pumpCalled || digitalRead(pumpControlPin)) state = PUMPING_STATE;     // If we are pumping, we need to report
-    if (meterSampleRate()) takeMeasurements();                                    // Take measurements every couple seconds
+    if (watchdogFlag) petWatchdog();
+    if (Time.hour() != currentHourlyPeriod) state = REPORTING_STATE;     // We want to report on the hour
+    if (stateOfCharge <= lowBattLimit) state = LOW_BATTERY_STATE;        // The battery is low - sleep
+    if (pumpCalled || digitalRead(pumpControlPin)) state = PUMPING_STATE;// If we are pumping, we need to report
+    if (meterSampleRate()) takeMeasurements();                           // Take measurements every couple seconds
     break;
 
   case PUMPING_STATE: {
     if (verboseMode && state != oldState) publishStateTransition();
 
-    if (pumpCalled && !pumpLockOut && !digitalRead(pumpControlPin)) {               // First time to this state we will turn on the pump and report
+    if (pumpCalled && !pumpLockOut && !digitalRead(pumpControlPin)) {   // First time to this state we will turn on the pump and report
       digitalWrite(pumpControlPin,HIGH);
       digitalWrite(blueLED,HIGH);
+      Log.info("Pump Turned On");
       pumpBackupTimer.start();
     }
     else if (!pumpCalled && digitalRead(pumpControlPin)) {
       digitalWrite(pumpControlPin,LOW);
       digitalWrite(blueLED,LOW);
+      Log.info("Pump turned Off");
       pumpBackupTimer.stop();
     }
     state = IDLE_STATE;                                                 // Go back to IDLE to make sure housekeeping is done
@@ -245,6 +253,7 @@ void loop()
 
   case LOW_BATTERY_STATE: {
     if (verboseMode && state != oldState) publishStateTransition();
+      Log.info("Low Battery - sleeping");
       if (Particle.connected()) disconnectFromParticle();               // If connected, we need to disconned and power down the modem
       digitalWrite(blueLED,LOW);                                        // Turn off the LED
       digitalWrite(pumpControlPin,LOW);                                 // Turn off the pump as we cannot monitor in our sleep
@@ -290,12 +299,14 @@ void loop()
         if (resetCount <= 3) {                                          // First try simple reset
           waitUntil(meterParticlePublish);
           if (Particle.connected()) Particle.publish("State","Error State - Reset", PRIVATE);    // Brodcast Reset Action
+          Log.info("Error State - Reset");
           delay(2000);
           System.reset();
         }
         else if (Time.now() - lastWebHookResponse > 7200L) {            //It has been more than two hours since a sucessful hook response
           waitUntil(meterParticlePublish);
           if (Particle.connected()) Particle.publish("State","Error State - Power Cycle", PRIVATE);  // Broadcast Reset Action
+          Log.info("Error State - Power Cycle");
           delay(2000);
           fram.put(FRAM::resetCountAddr,0);                             // Zero the ResetCount
           digitalWrite(hardResetPin,HIGH);                              // This will cut all power to the Electron AND the carrier board
@@ -303,6 +314,7 @@ void loop()
         else {                                                          // If we have had 3 resets - time to do something more
           waitUntil(meterParticlePublish);
           if (Particle.connected()) Particle.publish("State","Error State - Full Modem Reset", PRIVATE);            // Brodcase Reset Action
+          Log.info("Error State - Full Modem Reset");
           delay(2000);
           fram.put(FRAM::resetCountAddr,0);                             // Zero the ResetCount
           fullModemReset();                                             // Full Modem reset and reboots
@@ -312,10 +324,12 @@ void loop()
   }
 }
 
-void pumpTimerCallback() { pumpCalled = false; }
+void pumpTimerCallback() { 
+  pumpCalled = false; 
+}
 
 void resolveAlert() {                                                   // This function takes the AlertValue and publishes a message
-  char data[128];
+  char data[128] = "";
   if (alertValue & 0b00000001) strcat(data,"Control Power - ");
   if (alertValue & 0b00000010) strcat(data,"Low Level - ");
   if (alertValue & 0b00000100) strcat(data,"Pump On - ");
@@ -329,6 +343,7 @@ void sendEvent() {
   snprintf(data, sizeof(data), "{\"alertValue\":%i, \"pumpAmps\":%i, \"pumpMins\":%i, \"battery\":%i, \"temp\":%i, \"resets\":%i}",alertValue, pumpAmps, dailyPumpingMins, stateOfCharge, temperatureF,resetCount);
   waitUntil(meterParticlePublish);
   Particle.publish("Monitoring_Event", data, PRIVATE);
+  Log.info(data);
   webhookTimeStamp = millis();
   currentHourlyPeriod = Time.hour();                                    // Change the time period since we have reported for this one 
   dataInFlight = true;                                                  // set the data inflight flag
@@ -587,7 +602,7 @@ void fullModemReset() {  // Adapted form Rikkas7's https://github.com/rickkas7/e
 	}
 	// Reset the modem and SIM card
 	// 16:MT silent reset (with detach from network and saving of NVM parameters), with reset of the SIM card
-	Cellular.command(30000, "AT+CFUN=16\r\n");
+	Cellular.off();
 	delay(1000);
 	// Go into deep sleep for 10 seconds to try to reset everything. This turns off the modem as well.
 	System.sleep(SLEEP_MODE_DEEP, 10);
@@ -635,6 +650,7 @@ void publishStateTransition(void) {                                     // Mainl
     waitUntil(meterParticlePublish);
     Particle.publish("State Transition",stateTransitionString, PRIVATE);
   }
+  Log.info(stateTransitionString);
   oldState = state;
 }
 
